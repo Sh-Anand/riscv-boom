@@ -91,6 +91,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     val wb_resp     = Input(Bool())
 
     val probe_rdy   = Output(Bool())
+
   })
 
   // TODO: Optimize this. We don't want to mess with cache during speculation
@@ -111,6 +112,8 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   val req_tag = req.addr >> untagBits
   val req_block_addr = (req.addr >> blockOffBits) << blockOffBits
   val req_needs_wb = RegInit(false.B)
+  
+  val flush_queued = RegInit(false.B) //has a flush been accepted as a secondary request?
 
   val new_coh = RegInit(ClientMetadata.onReset)
   val (_, shrink_param, coh_on_clear) = req.old_meta.coh.onCacheControl(M_FLUSH)
@@ -121,9 +124,11 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   val (cmd_requires_second_acquire, is_hit_again, _, dirtier_coh, dirtier_cmd) =
     new_coh.onSecondaryAccess(req.uop.mem_cmd, io.req.uop.mem_cmd)
 
+  
   val (_, _, refill_done, refill_address_inc) = edge.addr_inc(io.mem_grant)
   val sec_rdy = (!cmd_requires_second_acquire && !io.req_is_probe &&
-                 !state.isOneOf(s_invalid, s_meta_write_req, s_mem_finish_1, s_mem_finish_2))// Always accept secondary misses
+                 !state.isOneOf(s_invalid, s_meta_write_req, s_mem_finish_1, s_mem_finish_2) && // Always accept secondary misses
+                 !flush_queued) // Always reject a secondary if we have a flush queued
 
   val rpq = Module(new BranchKillableQueue(new BoomDCacheReqInternal, cfg.nRPQ, u => u.uses_ldq, false))
   rpq.io.brupdate := io.brupdate
@@ -174,6 +179,8 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     when (is_hit_again) {
       new_coh := dirtier_coh
     }
+
+    flush_queued := flush_queued | isFlush(req.uop.mem_cmd)
   }
 
   def handle_pri_req(old_state: UInt): UInt = {
@@ -204,6 +211,8 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   when (state === s_invalid) {
     io.req_pri_rdy := true.B
     grant_had_data := false.B
+
+    flush_queued := false.B
 
     when (io.req_pri_val && io.req_pri_rdy) {
       state := handle_pri_req(state)
@@ -507,6 +516,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val resp = Decoupled(new BoomDCacheResp)
     val secondary_miss = Output(Vec(memWidth, Bool()))
     val block_hit = Output(Vec(memWidth, Bool()))
+    val flush_safe = Output(Vec(memWidth, Bool())) // incoming flush request may safely flush
 
     val brupdate       = Input(new BrUpdateInfo)
     val exception    = Input(Bool())
@@ -557,6 +567,11 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   val sdq_rdy      = !sdq_val.andR
   val sdq_enq      = req.fire && cacheable && isWrite(req.bits.uop.mem_cmd)
   val sdq          = Mem(cfg.nSDQ, UInt(coreDataBits.W))
+
+  dontTouch(sdq_val)
+  dontTouch(sdq_alloc_id)
+  dontTouch(sdq_rdy)
+  dontTouch(sdq_enq)
 
   when (sdq_enq) {
     sdq(sdq_alloc_id) := req.bits.data
@@ -615,7 +630,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
 
   val mshr_alloc_idx = Wire(UInt())
   val pri_rdy = WireInit(false.B)
-  val pri_val = req.valid && sdq_rdy && cacheable && !idx_match(req_idx)
+  val pri_val = req.valid && sdq_rdy && cacheable && !idx_match(req_idx) && !isFlush(req.bits.uop.mem_cmd)
   val mshrs = (0 until cfg.nMSHRs) map { i =>
     val mshr = Module(new BoomMSHR)
     mshr.io.id := i.U(log2Ceil(cfg.nMSHRs).W)
