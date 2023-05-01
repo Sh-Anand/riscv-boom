@@ -356,7 +356,8 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       new_coh := coh_on_hit
     }
     when (rpq.io.empty && !rpq.io.enq.valid) {
-      state := s_meta_write_req
+      state := Mux(flush_queued, s_mem_finish_1, s_meta_write_req)
+      finish_to_prefetch := finish_to_prefetch | flush_queued
     }
   } .elsewhen (state === s_meta_write_req) {
     io.meta_write.valid         := true.B
@@ -744,7 +745,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     mshr
   }
 
-  mmio_alloc_arb.io.out.ready := req.valid && !cacheable
+  mmio_alloc_arb.io.out.ready := req.valid && !cacheable && !isFlush(req.bits.uop.mem_cmd)
 
   TLArbiter.lowestFromSeq(edge, io.mem_acquire, mshrs.map(_.io.mem_acquire) ++ mmios.map(_.io.mem_access))
   TLArbiter.lowestFromSeq(edge, io.mem_finish,  mshrs.map(_.io.mem_finish))
