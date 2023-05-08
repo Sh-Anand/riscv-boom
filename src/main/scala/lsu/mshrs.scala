@@ -87,6 +87,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
     // Replays go through the cache pipeline again
     val replay      = Decoupled(new BoomDCacheReqInternal)
+
     // Resp go straight out to the core
     val resp        = Decoupled(new BoomDCacheResp)
 
