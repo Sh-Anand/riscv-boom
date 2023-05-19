@@ -141,6 +141,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   val refill_ctr  = Reg(UInt(log2Ceil(cacheDataBeats).W))
   val commit_line = Reg(Bool())
   val grant_had_data = Reg(Bool())
+  val grant_set_persistence_bit = Reg(Bool()) 
   val finish_to_prefetch = Reg(Bool())
 
   // Block probes if a tag write we started is still in the pipeline
@@ -206,6 +207,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   when (state === s_invalid) {
     io.req_pri_rdy := true.B
     grant_had_data := false.B
+    grant_set_persistence_bit := false.B
 
     when (io.req_pri_val && io.req_pri_rdy) {
       state := handle_pri_req(state)
@@ -234,6 +236,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
     when (io.mem_grant.fire) {
       grant_had_data := edge.hasData(io.mem_grant.bits)
+      grant_set_persistence_bit := io.mem_grant.bits.opcode === TLMessages.GrantDataDirty
     }
     when (refill_done) {
       grantack.valid := edge.isRequest(io.mem_grant.bits)
@@ -357,6 +360,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.idx      := req_idx
     io.meta_write.bits.data.coh := new_coh
     io.meta_write.bits.data.tag := req_tag
+    io.meta_write.bits.data.persistence := grant_set_persistence_bit
     io.meta_write.bits.way_en   := req.way_en
     when (io.meta_write.fire) {
       state := s_mem_finish_1
