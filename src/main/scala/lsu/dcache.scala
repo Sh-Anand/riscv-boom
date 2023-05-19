@@ -221,6 +221,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_write.valid := state === s_meta_write
   io.meta_write.bits.way_en := way_en
   io.meta_write.bits.idx := req_idx
+  io.meta_write.bits.data.persistence := true.B // on permissions downgrade (not to invalid but from dirty to shared) we have no idea if persistent or not as L2 may writeback at any time.
   io.meta_write.bits.tag := req_tag
   io.meta_write.bits.data.tag := req_tag
   io.meta_write.bits.data.coh := new_coh
@@ -382,6 +383,7 @@ class BoomFlushMSHR(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_write.bits.tag := req.tag
   io.meta_write.bits.data.tag := req.tag
   io.meta_write.bits.data.coh := Mux(req.dirty && req.is_wb, ClientMetadata.clean, ClientMetadata.onReset)
+  io.meta_write.bits.data.persistence := false.B
 
   io.data_req.valid := state === s_fill_buffer && !r2_data_req_fired
   io.data_req.bits.way_en := req.way_en
@@ -1040,6 +1042,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                            wayMap((w: Int) => s1_tag_eq_way(i)(w) && meta(i).io.resp(w).coh.isValid()).asUInt))))
 
   val s1_wb_idx_matches = widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid)
+  
+  // get persistence bit
+  val s1_persistence_bit_way = widthMap(i => wayMap((w: Int) => s1_tag_match_way(i)(w) && meta(i).io.resp(w).persistence))
+
 
   val s2_req   = RegNext(s1_req)
   val s2_type  = RegNext(s1_type)
@@ -1070,6 +1076,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_hit_state     = widthMap(i => Mux1H(s2_tag_match_way(i), wayMap((w: Int) => RegNext(meta(i).io.resp(w).coh))))
   val s2_has_permission = widthMap(w => s2_hit_state(w).onAccess(s2_req(w).uop.mem_cmd)._1)
   val s2_new_hit_state  = widthMap(w => s2_hit_state(w).onAccess(s2_req(w).uop.mem_cmd)._3)
+
+  val s2_persistence_bit_way = RegNext(s1_persistence_bit_way)
+  val s2_persistence_bit = s2_persistence_bit_way.map(_.orR)  
 
   val s2_hit = widthMap(w => (s2_tag_match(w) && s2_has_permission(w) && s2_hit_state(w) === s2_new_hit_state(w) && !mshrs.io.block_hit(w)) || s2_type.isOneOf(t_replay, t_wb))
   val s2_nack = Wire(Vec(memWidth, Bool()))
@@ -1194,6 +1203,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val cacheable = edge.manager.supportsAcquireBFast(s2_req(0).addr, lgCacheBlockBytes.U)
   // can we flush already? (if req is valid, we can either flush immediately (cache hit or MSHR miss) or we need to piggyback an outgoing MSHR)
   val s2_flush_valid = s2_valid(0) && cacheable && s2_is_flush(0) && (s2_hit(0) || !mshrs.io.block_hit(0))  
+  // check if we can avoid flushing because of the persistence bit
+  // in case of a replay is always necessary as replays are not fired unless it detects either the persistence bit if a previous replay dirtied the cache
+  val flush_unnecessary = s2_type =/= t_replay && s2_hit(0) && s2_hit_state(0).state =/= ClientStates.Dirty && !s2_persistence_bit(0)
   
   // queue the flush request(s)
   for (w <- 0 until memWidth) { // Note: since the actual flush is always request 0, the other "requests" are only probes
@@ -1204,8 +1216,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     flsh.io.req.bits(w).new_coh := DontCare
     flsh.io.req.bits(w).uop := s2_req(w).uop
   }
+
   // queue required details for request 0 (real flush). probes dont need this info
-  flsh.io.req.valid := s2_flush_valid
+  flsh.io.req.valid := s2_flush_valid && !flush_unnecessary
   flsh.io.req.bits(0).way_en := s2_tag_match_way(0)
   flsh.io.req.bits(0).hit := s2_hit(0)
   flsh.io.req.bits(0).dirty := (s2_hit_state(0) === ClientStates.Dirty) || ((s2_type === t_replay) && s2_replay_dirty)

@@ -150,6 +150,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   val refill_ctr  = Reg(UInt(log2Ceil(cacheDataBeats).W))
   val commit_line = Reg(Bool())
   val grant_had_data = Reg(Bool())
+  val grant_set_persistence_bit = Reg(Bool()) 
   val finish_to_prefetch = Reg(Bool())
 
   // Block probes if a tag write we started is still in the pipeline
@@ -219,6 +220,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   when (state === s_invalid) {
     io.req_pri_rdy := true.B
     grant_had_data := false.B
+    grant_set_persistence_bit := false.B
 
     flush_queued := false.B
 
@@ -249,6 +251,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
     when (io.mem_grant.fire) {
       grant_had_data := edge.hasData(io.mem_grant.bits)
+      grant_set_persistence_bit := io.mem_grant.bits.opcode === TLMessages.GrantDataDirty
     }
     when (refill_done) {
       grantack.valid := edge.isRequest(io.mem_grant.bits)
@@ -354,10 +357,21 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       }
     }
   } .elsewhen (state === s_drain_rpq) {
-    io.replay <> rpq.io.deq
-    io.replay.bits.way_en    := req.way_en
-    io.replay.bits.addr := Cat(req_tag, req_idx, rpq.io.deq.bits.addr(blockOffBits-1,0))
-    io.replay.bits.dirty := new_coh.state === ClientStates.Dirty
+    val new_coh_is_dirty = new_coh.state === ClientStates.Dirty
+
+    when (rpq.io.deq.valid) {
+      // if L2 is not dirty and neither are we, dont flush
+      when (isFlush(rpq.io.deq.bits.uop.mem_cmd) && !new_coh_is_dirty && !grant_set_persistence_bit) {
+        rpq.io.deq.ready := true.B
+        io.replay.valid := false.B
+        io.replay.bits := DontCare
+      } .otherwise {
+        io.replay <> rpq.io.deq
+        io.replay.bits.way_en    := req.way_en
+        io.replay.bits.addr := Cat(req_tag, req_idx, rpq.io.deq.bits.addr(blockOffBits-1,0))
+        io.replay.bits.dirty := new_coh_is_dirty
+      }
+    }
     when (io.replay.fire && isWrite(rpq.io.deq.bits.uop.mem_cmd)) {
       // Set dirty bit
       val (is_hit, _, coh_on_hit) = new_coh.onAccess(rpq.io.deq.bits.uop.mem_cmd)
@@ -373,6 +387,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.idx      := req_idx
     io.meta_write.bits.data.coh := new_coh
     io.meta_write.bits.data.tag := req_tag
+    io.meta_write.bits.data.persistence := grant_set_persistence_bit
     io.meta_write.bits.way_en   := req.way_en
     when (io.meta_write.fire) {
       state := s_mem_finish_1
