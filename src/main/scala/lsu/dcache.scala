@@ -28,8 +28,6 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   val io = IO(new Bundle {
     val req = Flipped(Decoupled(new WritebackReq(edge.bundle)))
     val meta_read = Decoupled(new L1MetaReadReq)
-    // val meta_only = Output(Bool())
-    // val block_state = Input(new ClientMetadata())
     val resp = Output(Bool())
     val idx = Output(Valid(UInt()))
     val data_req = Decoupled(new L1DataReadReq)
@@ -37,6 +35,10 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
     val mem_grant = Input(Bool())
     val release = Decoupled(new TLBundleC(edge.bundle))
     val lsu_release = Decoupled(new TLBundleC(edge.bundle))
+
+    //val flsh_rdy = Input(Bool()) // Is flush unit ready?
+    val flsh_invalidate = Valid(new L1TagIdxReq) // Invalidate any pending flush requests in the flush unit's request queue
+    val flsh_mshr_rdy = Output(Bool()) // Show we block flush unit from allocating an mshr while we are probing?
   })
 
   val req = Reg(new WritebackReq(edge.bundle))
@@ -65,6 +67,10 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   io.lsu_release.valid := false.B
   io.lsu_release.bits := DontCare
 
+  io.flsh_invalidate.valid := state =/= s_invalid
+  io.flsh_invalidate.bits.tag := req.tag
+  io.flsh_invalidate.bits.idx := req.idx
+  io.flsh_mshr_rdy := state === s_invalid
 
   val r_address = Cat(req.tag, req.idx) << blockOffBits
   val id = cfg.nMSHRs
@@ -448,7 +454,8 @@ class BoomFlushReqQueue(entries: Int) (implicit p: freechips.rocketchip.config.P
     val tag_match_idx = Output(Vec(memWidth, Bool())) // match found in queue
     
     val probe_invalidate = Flipped(Valid(new L1TagIdxReq)) // invalidate flushes in response to a Probe
-    val probe_flsh_rdy = Input(Bool()) // prevent dequeing a request if the probe unit has blocked us
+    val wb_invalidate = Flipped(Valid(new L1TagIdxReq)) // invalidate flushes in response to a Probe
+    val flsh_rdy = Input(Bool()) // prevent dequeing a request if the probe or wb unit has blocked us
 
     val brupdate  = Input(new BrUpdateInfo())
     val flush   = Input(Bool())
@@ -456,12 +463,12 @@ class BoomFlushReqQueue(entries: Int) (implicit p: freechips.rocketchip.config.P
 
   val queue = Module(new BranchKillableQueue(new FlushReq, entries, u => u.uses_ldq, false))
   
-  io.enq.ready := queue.io.enq.ready && io.probe_flsh_rdy
-  queue.io.enq.valid := io.enq.valid && io.probe_flsh_rdy
+  io.enq.ready := queue.io.enq.ready && io.flsh_rdy
+  queue.io.enq.valid := io.enq.valid && io.flsh_rdy
   queue.io.enq.bits := io.enq.bits
 
-  io.deq.valid := queue.io.deq.valid && io.probe_flsh_rdy
-  queue.io.deq.ready := io.deq.ready && io.probe_flsh_rdy
+  io.deq.valid := queue.io.deq.valid && io.flsh_rdy
+  queue.io.deq.ready := io.deq.ready && io.flsh_rdy
   io.deq.bits <> queue.io.deq.bits
   queue.io.brupdate := io.brupdate
   queue.io.flush := io.flush
@@ -469,32 +476,25 @@ class BoomFlushReqQueue(entries: Int) (implicit p: freechips.rocketchip.config.P
   queue.io.buffer_overwrite_idx := DontCare
   queue.io.buffer_overwrite.bits := DontCare
 
-  // val q_tags = Wire(Vec(entries, UInt(tagBits.W)))
-  // val q_idxs = Wire(Vec(entries, UInt(idxBits.W)))
-  // val q_valids = Wire(Vec(entries, Bool()))
-  // q_tags := DontCare
-  // q_valids := DontCare
-  // q_idxs := DontCare
-
-  // dontTouch(q_tags)
-  // dontTouch(q_idxs)
-  // dontTouch(q_valids)
-
   val queue_valids_tag_idx = queue.io.buffer.map(q => (q.valid, q.bits.addr >> untagBits, q.bits.addr(idxMSB, idxLSB)))
   io.tag_match_idx := io.req_probe.map(req => queue_valids_tag_idx.map(q => q._1 && req.tag === q._2 && req.idx === q._3).reduce(_||_))
 
-  // for (i <- 0 until entries) {
-  //   q_valids(i) := queue_valids_tag_idx(i)._1
-  //   q_tags(i) := queue_valids_tag_idx(i)._2
-  //   q_idxs(i) := queue_valids_tag_idx(i)._3
-  // }
   val probe_invalidate_match = queue_valids_tag_idx.map(q => io.probe_invalidate.valid && q._1 && (q._2 === io.probe_invalidate.bits.tag) && (q._3 === io.probe_invalidate.bits.idx))
+  val wb_invalidate_match = queue_valids_tag_idx.map(q => io.wb_invalidate.valid && q._1 && (q._2 === io.wb_invalidate.bits.tag) && (q._3 === io.wb_invalidate.bits.idx))
   for (i <- 0 until entries) {
     when (probe_invalidate_match(i)) {
       queue.io.buffer_overwrite.valid := true.B
       queue.io.buffer_overwrite_idx := i.U
       queue.io.buffer_overwrite.bits := queue.io.buffer(i).bits
       queue.io.buffer_overwrite.bits.hit := false.B
+      queue.io.buffer_overwrite.bits.dirty := false.B
+    }
+    when (wb_invalidate_match(i)) {
+      queue.io.buffer_overwrite.valid := true.B
+      queue.io.buffer_overwrite_idx := i.U
+      queue.io.buffer_overwrite.bits := queue.io.buffer(i).bits
+      queue.io.buffer_overwrite.bits.hit := false.B
+      queue.io.buffer_overwrite.bits.dirty := false.B
     }
   }
 }
@@ -518,6 +518,9 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
     val probe_invalidate = Flipped(Valid(new L1TagIdxReq)) // probe unit may invalidate pending flushes in the buffer in the event of a probe
     val probe_rdy = Output(Bool()) // are we blocking the probe unit?
 
+    val wb_flsh_rdy = Input(Bool()) // has the wb unit blocked us?
+    val wb_invalidate = Flipped(Valid(new L1TagIdxReq)) // wb unit may invalidate pending flushes in the buffer in the event of a wb
+
     val nack = Output(Vec(memWidth, Bool())) // nack for the first (0th) request AKA the actual flush
 
     val forward_data = Output(Vec(memWidth, Valid(UInt(encRowBits.W))))
@@ -539,7 +542,8 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
   flshq.io.flush  := io.exception
   flshq.io.deq.ready := false.B
   flshq.io.probe_invalidate := io.probe_invalidate
-  flshq.io.probe_flsh_rdy := io.probe_flsh_rdy
+  flshq.io.wb_invalidate := io.wb_invalidate
+  flshq.io.flsh_rdy := io.probe_flsh_rdy && io.wb_flsh_rdy
 
   io.req.ready := flshq.io.enq.ready && !tag_idx_match(0)
 
@@ -1304,8 +1308,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // flush unit probe invalidation
   flsh.io.probe_invalidate := prober.io.flsh_invalidate
+  // flush unit wb invalidation
+  flsh.io.wb_invalidate := wb.io.flsh_invalidate
   // flush unit probe ready
   flsh.io.probe_flsh_rdy := prober.io.flsh_mshr_rdy
+  // flush unit wb ready
+  flsh.io.wb_flsh_rdy := wb.io.flsh_mshr_rdy
   dontTouch(s2_data_muxed)
 
   // writebacks
