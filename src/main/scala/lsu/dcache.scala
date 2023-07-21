@@ -68,10 +68,10 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   io.lsu_release.valid := false.B
   io.lsu_release.bits := DontCare
 
-  io.flsh_invalidate.valid := state =/= s_invalid
+  io.flsh_invalidate.valid := state =/= s_invalid && req.voluntary
   io.flsh_invalidate.bits.tag := req.tag
   io.flsh_invalidate.bits.idx := req.idx
-  io.flsh_mshr_rdy := state === s_invalid
+  io.flsh_mshr_rdy := state === s_invalid || !req.voluntary
 
   val r_address = Cat(req.tag, req.idx) << blockOffBits
   val id = cfg.nMSHRs
@@ -99,8 +99,8 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
       acked := false.B
     }
   } .elsewhen (state === s_halt_check) {
-    state := Mux(io.flsh_halt, s_invalid, s_fill_buffer)
-    io.resp := io.flsh_halt
+    state := Mux(io.flsh_halt && req.voluntary, s_invalid, s_fill_buffer)
+    io.resp := io.flsh_halt && req.voluntary
   } .elsewhen (state === s_fill_buffer) {
     io.meta_read.valid := data_req_cnt < refillCycles.U
     io.meta_read.bits.idx := req.idx
@@ -608,8 +608,8 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
     io.forward_data(i).valid := forward_valid
     io.forward_data(i).bits := match_mshrs_forward_data(i).bits(req_word_idx(i))
     // allows (hit) stores to proceed if there is an outgoing writeback
-    val store_can_proceed = isWrite(io.req.bits(i).uop.mem_cmd) && io.req.bits(i).hit && match_mshrs_status(i).valid && match_mshrs_status(i).bits.is_wb
-    io.nack(i) := tag_idx_match(i) && !forward_valid && !store_can_proceed
+    // val store_can_proceed = isWrite(io.req.bits(i).uop.mem_cmd) && io.req.bits(i).hit && match_mshrs_status(i).valid && match_mshrs_status(i).bits.is_wb
+    io.nack(i) := tag_idx_match(i) && !forward_valid //&& !store_can_proceed
   }
 
   // Try to round-robin the MSHRs
