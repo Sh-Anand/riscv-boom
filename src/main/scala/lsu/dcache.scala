@@ -348,7 +348,7 @@ class BoomFlushMSHR(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_write.bits.idx := req.idx
   io.meta_write.bits.tag := req.tag
   io.meta_write.bits.data.tag := req.tag
-  io.meta_write.bits.data.coh := ClientMetadata.onReset
+  io.meta_write.bits.data.coh := Mux(req.dirty && req.is_wb, ClientMetadata.clean, ClientMetadata.onReset)
 
   io.data_req.valid := state === s_fill_buffer && !r2_data_req_fired
   io.data_req.bits.way_en := req.way_en
@@ -367,7 +367,7 @@ class BoomFlushMSHR(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     when (io.req.valid) {
       req := io.req.bits
       data_req_cnt := 0.U
-      state := Mux(io.req.bits.hit, Mux(io.req.bits.is_wb, Mux(io.req.bits.dirty, s_fill_buffer, s_root_release), s_meta_write), s_root_release)  // do we have to invalidate this block?
+      state := Mux(io.req.bits.hit, Mux(io.req.bits.is_wb, Mux(io.req.bits.dirty, s_meta_write, s_root_release), s_meta_write), s_root_release)   // do we have to invalidate this block?
     }
   } .elsewhen (state === s_meta_write) {
     when (io.meta_write.fire) {
