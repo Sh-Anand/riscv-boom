@@ -34,6 +34,8 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
     val mem_grant = Input(Bool())
     val release = Decoupled(new TLBundleC(edge.bundle))
     val lsu_release = Decoupled(new TLBundleC(edge.bundle))
+    
+    val flsh_mshr_rdy = Output(Bool())
   })
 
   val req = Reg(new WritebackReq(edge.bundle))
@@ -47,6 +49,8 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   val (_, last_beat, all_beats_done, beat_count) = edge.count(io.release)
   val wb_buffer = Reg(Vec(refillCycles, UInt(encRowBits.W)))
   val acked = RegInit(false.B)
+
+  io.flsh_mshr_rdy := state === s_invalid
 
   io.idx.valid       := state =/= s_invalid
   io.idx.bits        := req.idx
@@ -156,6 +160,8 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     val mshr_rdy = Input(Bool()) // Is MSHR ready for this request to proceed?
     val mshr_wb_rdy = Output(Bool()) // Should we block MSHR writebacks while we finish our own?
     val flsh_rdy = Input(Bool()) // Is flush unit ready?
+    val flsh_mshr_rdy = Output(Bool()) // should we block flush unit?
+
     val block_state = Input(new ClientMetadata())
     val lsu_release = Decoupled(new TLBundleC(edge.bundle))
 
@@ -210,6 +216,8 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
 
 
   io.mshr_wb_rdy := !state.isOneOf(s_release, s_writeback_req, s_writeback_resp, s_meta_write, s_meta_write_resp)
+
+  io.flsh_mshr_rdy := state === s_invalid
 
   io.lsu_release.valid := state === s_lsu_release
   io.lsu_release.bits  := edge.ProbeAck(req, report_param)
@@ -421,7 +429,9 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
     val data_req = Decoupled(new L1BlockReadReq)
     val data_resp = Input(Vec(nWays, Vec(refillCycles, UInt(encRowBits.W))))
 
-    val probe_rdy = Output(Bool())
+    val probe_rdy = Output(Bool()) //should we block prober?
+    val probe_flsh_rdy = Input(Bool()) //are we blocked?
+    val wb_flsh_rdy = Input(Bool()) // are we blocked?
     val nack = Output(Vec(memWidth, Bool())) // nack for the first (0th) request AKA the actual flush
 
     val forward_data = Output(Vec(memWidth, Valid(UInt(encRowBits.W))))
@@ -432,7 +442,7 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
   val tag_idx_match = Wire(Vec(memWidth, Bool()))
   val mshr_alloc_idx = Wire(UInt())
   val mshr_rdy = WireInit(false.B)
-  val mshr_valid = io.req.valid && !tag_idx_match(0)
+  val mshr_valid = io.req.valid && !tag_idx_match(0) && io.probe_flsh_rdy && io.wb_flsh_rdy
   val flush_counter = RegInit(0.U(log2Ceil(cfg.nFlshMSHRs +1).W))
   val update_counter = WireInit(0.U(log2Ceil(cfg.nFlshMSHRs + 1).W))
 
@@ -489,7 +499,7 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
             )
           )
   tag_idx_match := tag_idx_match_mshr.map(t => t.reduce(_||_))
-  io.req.ready := mshr_rdy && !tag_idx_match(0)  
+  io.req.ready := mshr_rdy && !tag_idx_match(0) && io.probe_flsh_rdy && io.wb_flsh_rdy
 
   io.flushing := flush_counter =/= 0.U
 
@@ -818,7 +828,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   metaReadArb.io.in(3).bits.req(0) := mshrs.io.meta_read.bits
   mshrs.io.meta_read.ready         := metaReadArb.io.in(3).ready
 
-
+  flsh.io.probe_flsh_rdy := prober.io.flsh_mshr_rdy
+  flsh.io.wb_flsh_rdy := wb.io.flsh_mshr_rdy
 
   // -----------
   // Write-backs
