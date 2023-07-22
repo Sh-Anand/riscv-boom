@@ -512,7 +512,7 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
     io.forward_data(i).bits := match_mshrs_forward_data(i).bits(req_word_idx(i))
     // allows (hit) stores to proceed if there is an outgoing writeback
     val store_can_proceed = isWrite(io.req.bits(i).uop.mem_cmd) && io.req.bits(i).hit && match_mshrs_status(i).valid && match_mshrs_status(i).bits.is_wb
-    io.nack(i) := tag_idx_match(i) && !forward_valid && !store_can_proceed
+    io.nack(i) := tag_idx_match(i) && !forward_valid //&& !store_can_proceed
   }
 
   // Try to round-robin the MSHRs
