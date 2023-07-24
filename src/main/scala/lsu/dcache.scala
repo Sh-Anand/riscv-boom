@@ -34,8 +34,7 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
     val mem_grant = Input(Bool())
     val release = Decoupled(new TLBundleC(edge.bundle))
     val lsu_release = Decoupled(new TLBundleC(edge.bundle))
-    
-    val flsh_mshr_rdy = Output(Bool())
+  
   })
 
   val req = Reg(new WritebackReq(edge.bundle))
@@ -49,8 +48,6 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   val (_, last_beat, all_beats_done, beat_count) = edge.count(io.release)
   val wb_buffer = Reg(Vec(refillCycles, UInt(encRowBits.W)))
   val acked = RegInit(false.B)
-
-  io.flsh_mshr_rdy := state === s_invalid
 
   io.idx.valid       := state =/= s_invalid
   io.idx.bits        := req.idx
@@ -293,7 +290,7 @@ class BoomFlushMSHR(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     val data_resp = Input(Vec(nWays, Vec(refillCycles, UInt(encRowBits.W))))
 
     val status = Valid(new FlushMSHRStatus)
-    val flush_inc = Valid(Bool()) // 0 for rootRelease 1 for rootReleaseAck
+    val flush_inc = Bool() // 1 for rootReleaseAck
     val forward_data = Valid(Vec(refillCycles, UInt(encRowBits.W))) // for flush -> load forwarding
   })
 
@@ -363,8 +360,7 @@ class BoomFlushMSHR(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.data_req.bits.idx := req.idx
   io.data_req.bits.tag := req.tag
   
-  io.flush_inc.valid := (state === s_invalid && io.req.valid) || (state === s_root_release_ack && io.root_release_ack)
-  io.flush_inc.bits := state === s_root_release_ack
+  io.flush_inc := (state === s_root_release_ack && io.root_release_ack)
 
   io.forward_data.valid := forward_data_valid
   io.forward_data.bits := wb_buffer
@@ -431,10 +427,7 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
 
     val probe_rdy = Output(Bool()) //should we block prober?
     val probe_flsh_rdy = Input(Bool()) //are we blocked?
-    val wb_flsh_rdy = Input(Bool()) // are we blocked?
     val nack = Output(Vec(memWidth, Bool())) // nack for the first (0th) request AKA the actual flush
-
-    val forward_data = Output(Vec(memWidth, Valid(UInt(encRowBits.W))))
   })
 
   val metaWriteArb = Module(new Arbiter(new L1MetaWriteReq, cfg.nFlshMSHRs))
@@ -442,7 +435,7 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
   val tag_idx_match = Wire(Vec(memWidth, Bool()))
   val mshr_alloc_idx = Wire(UInt())
   val mshr_rdy = WireInit(false.B)
-  val mshr_valid = io.req.valid && !tag_idx_match(0) && io.probe_flsh_rdy && io.wb_flsh_rdy
+  val mshr_valid = io.req.valid && !tag_idx_match(0) && io.probe_flsh_rdy
   val flush_counter = RegInit(0.U(log2Ceil(cfg.nFlshMSHRs +1).W))
   val update_counter = WireInit(0.U(log2Ceil(cfg.nFlshMSHRs + 1).W))
 
@@ -499,7 +492,7 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
             )
           )
   tag_idx_match := tag_idx_match_mshr.map(t => t.reduce(_||_))
-  io.req.ready := mshr_rdy && !tag_idx_match(0) && io.probe_flsh_rdy && io.wb_flsh_rdy
+  io.req.ready := mshr_rdy && !tag_idx_match(0) && io.probe_flsh_rdy
 
   io.flushing := flush_counter =/= 0.U
 
@@ -508,8 +501,6 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
   val match_mshrs_status = tag_idx_match_mshr.map(t => Mux1H(t, mshrs.map(_.io.status)))
   for (i <- 0 until memWidth) {
     val forward_valid = false.B//isRead(io.req.bits(i).uop.mem_cmd) && match_mshrs_forward_data(i).valid
-    io.forward_data(i).valid := forward_valid
-    io.forward_data(i).bits := match_mshrs_forward_data(i).bits(req_word_idx(i))
     // allows (hit) stores to proceed if there is an outgoing writeback
     val store_can_proceed = isWrite(io.req.bits(i).uop.mem_cmd) && io.req.bits(i).hit && match_mshrs_status(i).valid && match_mshrs_status(i).bits.is_wb
     io.nack(i) := tag_idx_match(i) && !forward_valid //&& !store_can_proceed
@@ -522,8 +513,8 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
     mshr_head := WrapInc(mshr_head, cfg.nFlshMSHRs)
   }
   
-  val add = mshrs.map(m=> (m.io.flush_inc.valid && !m.io.flush_inc.bits).asUInt).reduce(_+_)
-  val subtract = mshrs.map(m=> (m.io.flush_inc.valid && m.io.flush_inc.bits).asUInt).reduce(_+_)
+  val add = io.req.fire
+  val subtract = mshrs.map(m=> (m.io.flush_inc).asUInt).reduce(_+_)
   // Update flush counter
   flush_counter := flush_counter + add - subtract
 
@@ -829,7 +820,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.meta_read.ready         := metaReadArb.io.in(3).ready
 
   flsh.io.probe_flsh_rdy := prober.io.flsh_mshr_rdy
-  flsh.io.wb_flsh_rdy := wb.io.flsh_mshr_rdy
 
   // -----------
   // Write-backs
@@ -1044,7 +1034,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_replaced_way_en = UIntToOH(RegNext(replacer.way))
   val s2_repl_meta = widthMap(i => Mux1H(s2_replaced_way_en, wayMap((w: Int) => RegNext(meta(i).io.resp(w))).toSeq))
 
-  val s2_can_forward_from_flush = widthMap(w => flsh.io.forward_data(w).valid)
   // nack because of incoming probe
   val s2_nack_hit    = RegNext(VecInit(s1_nack))
   // Nack when we hit something currently being evicted
@@ -1066,7 +1055,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   s2_nack           := widthMap(w => (s2_nack_miss(w) || s2_nack_hit(w) || s2_nack_victim(w) || s2_nack_data(w) || s2_nack_wb(w) || (s2_nack_flsh(w))) && s2_type =/= t_replay)
   val s2_send_resp = widthMap(w => (RegNext(s1_send_resp_or_nack(w)) && !s2_nack(w) &&
-                      (s2_hit(w) || (mshrs.io.req(w).fire && (isWrite(s2_req(w).uop.mem_cmd) || s2_is_flush(w)) && !isRead(s2_req(w).uop.mem_cmd)) || (isRead(s2_req(w).uop.mem_cmd) && s2_can_forward_from_flush(w)))))
+                      (s2_hit(w) || (mshrs.io.req(w).fire && (isWrite(s2_req(w).uop.mem_cmd) || s2_is_flush(w)) && !isRead(s2_req(w).uop.mem_cmd)))))
 
   val s2_send_nack = widthMap(w => (RegNext(s1_send_resp_or_nack(w)) && s2_nack(w)))
   for (w <- 0 until memWidth)
@@ -1081,7 +1070,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   dontTouch(s2_send_resp)
   dontTouch(s2_send_nack)
   dontTouch(s2_nack)
-  dontTouch(s2_can_forward_from_flush)
   // hits always send a response
   // If MSHR is not available, LSU has to replay this request later
   // If MSHR is available and this is only a store(not a amo), we don't need to wait for resp later
@@ -1116,7 +1104,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                             !s2_nack_data(w)        &&
                             !s2_nack_flsh(w)        &&
                             !s2_nack_wb(w)          &&
-                            !s2_can_forward_from_flush(w) &&
                              s2_type.isOneOf(t_lsu, t_prefetch)             &&
                             !IsKilledByBranch(io.lsu.brupdate, s2_req(w).uop) &&
                             !(io.lsu.exception && s2_req(w).uop.uses_ldq)   &&
@@ -1290,11 +1277,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // Store -> Load bypassing
   for (w <- 0 until memWidth) {
-    s2_data_word(w) := Mux(flsh.io.forward_data(w).valid, flsh.io.forward_data(w).bits,
-                       Mux(s3_bypass(w), s3_req.data,
+    s2_data_word(w) := Mux(s3_bypass(w), s3_req.data,
                        Mux(s4_bypass(w), s4_req.data,
                        Mux(s5_bypass(w), s5_req.data,
-                                         s2_data_word_prebypass(w)))))
+                                         s2_data_word_prebypass(w))))
   }
   val amoalu   = Module(new AMOALU(xLen))
   amoalu.io.mask := new StoreGen(s2_req(0).uop.mem_size, s2_req(0).addr, 0.U, xLen/8).mask
