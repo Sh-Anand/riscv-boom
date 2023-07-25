@@ -436,8 +436,6 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
   val mshr_alloc_idx = Wire(UInt())
   val mshr_rdy = WireInit(false.B)
   val mshr_valid = io.req.valid && !tag_idx_match(0) && io.probe_flsh_rdy
-  val flush_counter = RegInit(0.U(log2Ceil(cfg.nFlshMSHRs +1).W))
-  val update_counter = WireInit(0.U(log2Ceil(cfg.nFlshMSHRs + 1).W))
 
   io.root_release_ack.ready := false.B
 
@@ -494,7 +492,7 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
   tag_idx_match := tag_idx_match_mshr.map(t => t.reduce(_||_))
   io.req.ready := mshr_rdy && !tag_idx_match(0) && io.probe_flsh_rdy
 
-  io.flushing := flush_counter =/= 0.U
+  io.flushing := !(mshrs.map(_.io.req.ready).reduce(_&&_))
 
   // forwarding flush -> loads
   val match_mshrs_forward_data = tag_idx_match_mshr.map(t => Mux1H(t, mshrs.map(_.io.forward_data)))
@@ -513,14 +511,6 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
     mshr_head := WrapInc(mshr_head, cfg.nFlshMSHRs)
   }
   
-  val add = io.req.fire
-  val subtract = mshrs.map(m=> (m.io.flush_inc).asUInt).reduce(_+_)
-  // Update flush counter
-  flush_counter := flush_counter + add - subtract
-
-  dontTouch(update_counter)
-  dontTouch(add)
-  dontTouch(subtract)
   dontTouch(blockReadArb.io)
   dontTouch(io.req)
 
@@ -719,9 +709,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val mshrs = Module(new BoomMSHRFile)
   val flsh = Module(new BoomFlushUnit)
 
-  // do we have any pending flushes?
-  io.lsu.dcache_flushing := flsh.io.flushing
-  dontTouch(io.lsu.dcache_flushing)
   dontTouch(tl_out)
   
   mshrs.io.clear_all    := io.lsu.force_order
@@ -1299,5 +1286,5 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   dataWriteArb.io.in(0).bits.way_en := s3_way
 
 
-  io.lsu.ordered := mshrs.io.fence_rdy && !s1_valid.reduce(_||_) && !s2_valid.reduce(_||_)
+  io.lsu.ordered := mshrs.io.fence_rdy && !s1_valid.reduce(_||_) && !s2_valid.reduce(_||_) && !flsh.io.flushing
 }
