@@ -28,9 +28,6 @@ class BoomDCacheReqInternal(implicit p: Parameters) extends BoomDCacheReq()(p)
   val old_meta  = new L1Metadata
   val way_en    = UInt(nWays.W)
 
-  // flush info (do we have to write back?)
-  val dirty = Bool()
-
   // Used in the MSHRs
   val sdq_id    = UInt(log2Ceil(cfg.nSDQ).W)
 }
@@ -115,8 +112,6 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   val req_tag = req.addr >> untagBits
   val req_block_addr = (req.addr >> blockOffBits) << blockOffBits
   val req_needs_wb = RegInit(false.B)
-  
-  val flush_queued = RegInit(false.B) //has a flush been accepted as a secondary request?
 
   val new_coh = RegInit(ClientMetadata.onReset)
   val (_, shrink_param, coh_on_clear) = req.old_meta.coh.onCacheControl(M_FLUSH)
@@ -130,8 +125,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   
   val (_, _, refill_done, refill_address_inc) = edge.addr_inc(io.mem_grant)
   val sec_rdy = (!cmd_requires_second_acquire && !io.req_is_probe &&
-                 !state.isOneOf(s_invalid, s_meta_write_req, s_mem_finish_1, s_mem_finish_2) && // Always accept secondary misses
-                 !flush_queued) // Always reject a secondary if we have a flush queued
+                 !state.isOneOf(s_invalid, s_meta_write_req, s_mem_finish_1, s_mem_finish_2)) // Always accept secondary misses
 
   val rpq = Module(new BranchKillableQueue(new BoomDCacheReqInternal, cfg.nRPQ, u => u.uses_ldq, false))
   rpq.io.brupdate := io.brupdate
@@ -182,10 +176,6 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     when (is_hit_again) {
       new_coh := dirtier_coh
     }
-
-    when (isFlush(io.req.uop.mem_cmd)) {
-      flush_queued := true.B
-    }
   }
 
   def handle_pri_req(old_state: UInt): UInt = {
@@ -216,8 +206,6 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   when (state === s_invalid) {
     io.req_pri_rdy := true.B
     grant_had_data := false.B
-
-    flush_queued := false.B
 
     when (io.req_pri_val && io.req_pri_rdy) {
       state := handle_pri_req(state)
@@ -354,7 +342,6 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.replay <> rpq.io.deq
     io.replay.bits.way_en    := req.way_en
     io.replay.bits.addr := Cat(req_tag, req_idx, rpq.io.deq.bits.addr(blockOffBits-1,0))
-    io.replay.bits.dirty := new_coh.state === ClientStates.Dirty
     when (io.replay.fire && isWrite(rpq.io.deq.bits.uop.mem_cmd)) {
       // Set dirty bit
       val (is_hit, _, coh_on_hit) = new_coh.onAccess(rpq.io.deq.bits.uop.mem_cmd)
@@ -362,8 +349,8 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       new_coh := coh_on_hit
     }
     when (rpq.io.empty && !rpq.io.enq.valid) {
-      state := Mux(flush_queued, s_mem_finish_1, s_meta_write_req)
-      finish_to_prefetch := finish_to_prefetch | flush_queued
+      state := s_meta_write_req
+      finish_to_prefetch := finish_to_prefetch
     }
   } .elsewhen (state === s_meta_write_req) {
     io.meta_write.valid         := true.B
