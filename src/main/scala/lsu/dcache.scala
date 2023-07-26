@@ -290,7 +290,6 @@ class BoomFlushMSHR(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     val data_resp = Input(Vec(nWays, Vec(refillCycles, UInt(encRowBits.W))))
 
     val status = Valid(new FlushMSHRStatus)
-    val flush_inc = Bool() // 1 for rootReleaseAck
   })
 
   val (s_invalid :: s_meta_write :: s_fill_buffer :: s_root_release_data :: s_root_release :: s_root_release_ack :: Nil) = Enum(6)
@@ -357,8 +356,6 @@ class BoomFlushMSHR(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.data_req.bits.way_en := req.way_en
   io.data_req.bits.idx := req.idx
   io.data_req.bits.tag := req.tag
-  
-  io.flush_inc := (state === s_root_release_ack && io.root_release_ack)
 
   dontTouch(io.req)
   
@@ -367,7 +364,7 @@ class BoomFlushMSHR(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     when (io.req.valid) {
       req := io.req.bits
       data_req_cnt := 0.U
-      state := Mux(io.req.bits.hit, Mux(io.req.bits.is_wb, Mux(io.req.bits.dirty, s_meta_write, s_root_release), s_meta_write), s_root_release)   // do we have to invalidate this block?
+      state := s_invalid//Mux(io.req.bits.hit, Mux(io.req.bits.is_wb, Mux(io.req.bits.dirty, s_meta_write, s_root_release), s_meta_write), s_root_release)   // do we have to invalidate this block?
     }
   } .elsewhen (state === s_meta_write) {
     when (io.meta_write.fire) {
@@ -999,19 +996,19 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_replaced_way_en = UIntToOH(RegNext(replacer.way))
   val s2_repl_meta = widthMap(i => Mux1H(s2_replaced_way_en, wayMap((w: Int) => RegNext(meta(i).io.resp(w))).toSeq))
 
+  val s2_is_flush = widthMap(w => isFlush(s2_req(w).uop.mem_cmd))
   // nack because of incoming probe
   val s2_nack_hit    = RegNext(VecInit(s1_nack))
   // Nack when we hit something currently being evicted
   val s2_nack_victim = widthMap(w => s2_valid(w) &&  s2_hit(w) && mshrs.io.secondary_miss(w))
   // MSHRs not ready for request
-  val s2_nack_miss   = widthMap(w => s2_valid(w) && !s2_hit(w) && !mshrs.io.req(w).ready)
+  val s2_nack_miss   = widthMap(w => s2_valid(w) && !s2_hit(w) && !mshrs.io.req(w).ready && !s2_is_flush(w))
   // Bank conflict on data arrays
   val s2_nack_data   = widthMap(w => data.io.nacks(w))
   // Can't allocate MSHR for same set currently being written back
   val s2_nack_wb     = widthMap(w => s2_valid(w) && !s2_hit(w) && s2_wb_idx_matches(w))
   // Flush unit is not ready or there is an outgoing flush for this address
   val s2_flsh_nack = flsh.io.nack
-  val s2_is_flush = widthMap(w => isFlush(s2_req(w).uop.mem_cmd))
   val s2_nack_flsh   = widthMap(w => ((w == 0).B && 
                                         ( (flsh.io.req.valid && !flsh.io.req.ready) ||
                                           (!s2_is_flush(w) && s2_flsh_nack(w)) )) ||
@@ -1042,7 +1039,14 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   val cacheable = edge.manager.supportsAcquireBFast(s2_req(0).addr, lgCacheBlockBytes.U)
   // can we flush already? (if req is valid, we can either flush immediately (cache hit or MSHR miss) or we need to piggyback an outgoing MSHR)
-  val s2_flush_valid = s2_valid(0) && cacheable && s2_is_flush(0) && (s2_hit(0) || !mshrs.io.block_hit(0))  
+  val s2_flush_valid = s2_valid(0) && cacheable && s2_is_flush(0) &&
+                       (s2_hit(0) || !mshrs.io.block_hit(0))  &&
+                       !IsKilledByBranch(io.lsu.brupdate, s2_req(0).uop) &&
+                       !s2_nack_hit(0) &&
+                       !s2_nack_victim(0) &&
+                       !s2_nack_data(0) &&
+                       !s2_nack_wb(0)
+
   
   // queue the flush request(s)
   for (w <- 0 until memWidth) { // Note: since the actual flush is always request 0, the other "requests" are only probes
@@ -1060,6 +1064,13 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   flsh.io.req.bits(0).dirty := s2_hit_state(0).onCacheControl(s2_req(0).uop.mem_cmd)._1
   flsh.io.req.bits(0).new_coh := s2_hit_state(0).onCacheControl(s2_req(0).uop.mem_cmd)._3
 
+  //flsh sanity
+  assert (!(flsh.io.req.fire && !s2_send_resp(0)))
+  assert (!(s2_send_nack(0) && flsh.io.req.fire))
+  for (w <- 0 until memWidth)
+    assert(!(s2_valid(w) && s2_is_flush(w) && mshrs.io.req(w).valid))
+  //assert (!(s2_valid(0) && s2_flush_valid(0) && IsKilledByBranch(io.lsu.brupdate, s2_req(0).uop)))
+
   // Miss handling
   for (w <- 0 until memWidth) {
     mshrs.io.req(w).valid := s2_valid(w)            &&
@@ -1067,7 +1078,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                             !s2_nack_hit(w)         &&
                             !s2_nack_victim(w)      &&
                             !s2_nack_data(w)        &&
-                            !s2_nack_flsh(w)        &&
+                            !s2_flsh_nack(w)        &&
                             !s2_nack_wb(w)          &&
                             !s2_is_flush(w)         &&
                              s2_type.isOneOf(t_lsu, t_prefetch)             &&
