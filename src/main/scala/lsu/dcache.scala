@@ -432,8 +432,6 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
 
   val req_tags = io.req.bits.map(r => r.addr >> untagBits)
   val req_idx = io.req.bits.map(r => r.addr(idxMSB, idxLSB))
-  val req_word_idx = io.req.bits.map(r => (r.addr >> 3) & 7.U)
-  // from 0 to cfg.NMSHRs are the dedicated flush mshrs for misses while nFlshMSHRs are the standard dcache flshmshrs.
   val mshrs = (0 until (cfg.nFlshMSHRs)) map { i =>
     val mshr = Module(new BoomFlushMSHR)
     val id =  (cfg.nMSHRs + 1 + i).U
@@ -445,7 +443,7 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
     mshr.io.req.bits.tag := req_tags(0)
     mshr.io.req.bits.idx := req_idx(0)
     mshr.io.req.bits.way_en := io.req.bits(0).way_en
-    mshr.io.req.bits.hit := io.req.bits(0).dirty
+    mshr.io.req.bits.hit := io.req.bits(0).hit
     mshr.io.req.bits.dirty := io.req.bits(0).dirty
     mshr.io.req.bits.new_coh := io.req.bits(0).new_coh
     mshr.io.req.bits.is_wb := io.req.bits(0).uop.is_flush_wb
@@ -475,12 +473,11 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
 
   TLArbiter.lowestFromSeq(edge, io.rep,  mshrs.map(_.io.rep))
 
-  val tag_idx_match_mshr = (0 until memWidth).map(w => 
+  tag_idx_match := (0 until memWidth).map(w => 
             mshrs.map(m => 
               (!m.io.req.ready && (m.io.status.bits.tag === (req_tags(w))) && (m.io.status.bits.idx === (req_idx(w))))
-            )
+            ).reduce(_||_)
           )
-  tag_idx_match := tag_idx_match_mshr.map(t => t.reduce(_||_))
   io.req.ready := mshr_rdy && !tag_idx_match(0) && io.probe_flsh_rdy
 
   io.flushing := !(mshrs.map(_.io.req.ready).reduce(_&&_))
@@ -495,7 +492,6 @@ class BoomFlushUnit(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule 
   
   dontTouch(blockReadArb.io)
   dontTouch(io.req)
-
 }
 
 class BoomL1MetaReadReq(implicit p: Parameters) extends BoomBundle()(p) {
