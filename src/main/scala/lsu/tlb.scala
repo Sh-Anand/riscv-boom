@@ -245,7 +245,7 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
   val cmd_read           = widthMap(w => isRead(io.req(w).bits.cmd))
   val cmd_write          = widthMap(w => isWrite(io.req(w).bits.cmd))
   val cmd_write_perms    = widthMap(w => cmd_write(w) ||
-    coreParams.haveCFlush.B && io.req(w).bits.cmd === M_FLUSH_ALL) // not a write, but needs write permissions
+    io.req(w).bits.cmd ===  M_FLUSH_ALL || io.req(w).bits.cmd === M_FLUSH) // not a write, but needs write permissions
 
   val lrscAllowed = widthMap(w => Mux((usingDataScratchpad || usingAtomicsOnlyForIO).B, 0.U, c_array(w)))
   val ae_array = widthMap(w =>

@@ -940,7 +940,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_sc_fail = s2_sc && !s2_lrsc_addr_match(0)
   when (lrsc_count > 0.U) { lrsc_count := lrsc_count - 1.U }
   when (s2_valid(0) && ((s2_type === t_lsu && s2_hit(0) && !s2_nack(0)) ||
-                     (s2_type === t_replay && s2_req(0).uop.mem_cmd =/= M_FLUSH_ALL))) {
+                     (s2_type === t_replay && s2_req(0).uop.mem_cmd =/= M_FLUSH_ALL && s2_req(0).uop.mem_cmd =/= M_FLUSH))) {
     when (s2_lr) {
       lrsc_count := (lrscCycles - 1).U
       lrsc_addr := s2_req(0).addr >> blockOffBits
