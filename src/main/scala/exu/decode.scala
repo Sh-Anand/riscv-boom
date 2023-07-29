@@ -248,8 +248,8 @@ object XDecode extends DecodeConstants
   FENCE   -> List(Y, N, X, uopFENCE, IQT_INT, FU_MEM , RT_X  , RT_X  , RT_X  , N, IS_X, N, Y, N, Y, N, M_X  , 0.U, N, N, N, Y, Y, CSR.N), // TODO PERF make fence higher performance
                                                                                                                                                        // currently serializes pipeline
 
-  CBO_CLEAN  -> List(Y, N, X, uopSTA,IQT_MEM, FU_MEM , RT_X  , RT_FIX  , RT_X  , N, IS_X, N, Y, N, N, N, M_FLUSH, 0.U, N, N, N, N, N, CSR.I),
-  CBO_FLUSH  -> List(Y, N, X, uopSTA,IQT_MEM, FU_MEM , RT_X  , RT_FIX  , RT_X  , N, IS_X, N, Y, N, N, N, M_FLUSH_ALL, 0.U, N, N, N, N, N, CSR.I),
+  CBO_CLEAN  -> List(Y, N, X, uopSTA,IQT_MEM, FU_MEM , RT_X  , RT_FIX  , RT_X  , N, IS_X, N, Y, N, N, N, M_FLUSH, 0.U, N, N, N, N, N, CSR.N),
+  CBO_FLUSH  -> List(Y, N, X, uopSTA,IQT_MEM, FU_MEM , RT_X  , RT_FIX  , RT_X  , N, IS_X, N, Y, N, N, N, M_FLUSH_ALL, 0.U, N, N, N, N, N, CSR.N),
            //                                                                  frs3_en                           wakeup_delay
            //     is val inst?                                                 |  imm sel                        |   bypassable (aka, known/fixed latency)
            //     |  is fp inst?                                               |  |     uses_ldq                 |   |  is_br
@@ -565,7 +565,7 @@ class DecodeUnit(implicit p: Parameters) extends BoomModule
   uop.fp_single  := cs.fp_single // TODO use this signal instead of the FPU decode's table signal?
 
   uop.mem_cmd    := cs.mem_cmd
-  uop.mem_size   := Mux(cs.mem_cmd.isOneOf(M_SFENCE, M_FLUSH_ALL, M_FLUSH), Cat(uop.lrs2 =/= 0.U, uop.lrs1 =/= 0.U), inst(13,12))
+  uop.mem_size   := Mux(cs.mem_cmd.isOneOf(M_SFENCE), Cat(uop.lrs2 =/= 0.U, uop.lrs1 =/= 0.U), inst(13,12))
   uop.mem_signed := !inst(14)
   uop.uses_ldq   := cs.uses_ldq
   uop.uses_stq   := cs.uses_stq

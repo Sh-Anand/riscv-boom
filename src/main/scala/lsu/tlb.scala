@@ -243,7 +243,7 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
   val cmd_amo_logical    = widthMap(w => usingAtomics.B && isAMOLogical(io.req(w).bits.cmd))
   val cmd_amo_arithmetic = widthMap(w => usingAtomics.B && isAMOArithmetic(io.req(w).bits.cmd))
   val cmd_read           = widthMap(w => isRead(io.req(w).bits.cmd))
-  val cmd_write          = widthMap(w => isWrite(io.req(w).bits.cmd))
+  val cmd_write          = widthMap(w => isWrite(io.req(w).bits.cmd) || isFlush(io.req(w).bits.cmd))
   val cmd_write_perms    = widthMap(w => cmd_write(w) ||
     io.req(w).bits.cmd ===  M_FLUSH_ALL || io.req(w).bits.cmd === M_FLUSH) // not a write, but needs write permissions
 

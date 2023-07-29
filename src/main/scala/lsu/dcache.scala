@@ -364,7 +364,7 @@ class BoomFlushMSHR(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     when (io.req.valid) {
       req := io.req.bits
       data_req_cnt := 0.U
-      state := Mux(io.req.bits.hit, Mux(io.req.bits.is_wb, Mux(io.req.bits.dirty, s_meta_write, s_root_release), s_meta_write), s_root_release)   // do we have to invalidate this block?
+      state := s_invalid //Mux(io.req.bits.hit, Mux(io.req.bits.is_wb, Mux(io.req.bits.dirty, s_meta_write, s_root_release), s_meta_write), s_root_release)   // do we have to invalidate this block?
     }
   } .elsewhen (state === s_meta_write) {
     when (io.meta_write.fire) {
