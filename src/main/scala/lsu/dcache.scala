@@ -830,11 +830,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val mshrs = Module(new BoomMSHRFile)
   val flsh = Module(new BoomFlushUnit)
 
-  // do we have any pending flushes?
-  io.lsu.dcache_flushing := flsh.io.flushing
   flsh.io.brupdate := io.lsu.brupdate
   flsh.io.exception := io.lsu.exception
-  dontTouch(io.lsu.dcache_flushing)
   dontTouch(tl_out)
   
   mshrs.io.clear_all    := io.lsu.force_order
@@ -1423,5 +1420,5 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   dataWriteArb.io.in(0).bits.way_en := s3_way
 
 
-  io.lsu.ordered := mshrs.io.fence_rdy && !s1_valid.reduce(_||_) && !s2_valid.reduce(_||_)
+  io.lsu.ordered := mshrs.io.fence_rdy && !s1_valid.reduce(_||_) && !s2_valid.reduce(_||_) && !flsh.io.flushing
 }
